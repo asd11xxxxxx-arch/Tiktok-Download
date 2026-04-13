@@ -30,7 +30,7 @@ def run_web():
 
 # --- CONFIGURATION ---
 # Render ရဲ့ Env Vars ထဲမှာ TOKEN ထည့်ထားရင် ပိုကောင်းပါတယ်။ 
-TOKEN = os.environ.get("TOKEN", "8512086853:AAFiGAsmxKfVdNRzynVv_AIjGpp-Kzr6OGg")
+TOKEN = os.environ.get("TOKEN", "8512086853:AAHK2NEV83KsG34QqTbwGHIULZEgXVo3tW4")
 
 CHOOSING, DOWNLOADING = range(2)
 
