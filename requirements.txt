@@ -2,3 +2,5 @@ pyTelegramBotAPI
 requests
 yt-dlp
 python-dotenv
+flask
+gunicorn
