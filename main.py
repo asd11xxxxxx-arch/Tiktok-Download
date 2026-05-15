@@ -1,5 +1,5 @@
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import requests
 import yt_dlp
 import os
@@ -8,29 +8,48 @@ import time
 import logging
 import threading
 from datetime import datetime
-from config import BOT_TOKEN, RAPIDAPI_KEY, RAPIDAPI_HOST, COOLDOWN_TIME, TEMP_DIR
+from flask import Flask, request
+import sys
 
-# ========== CONFIGURATION ==========
+# ========== FLASK APP FOR RENDER ==========
+app = Flask(__name__)
+
+@app.route('/')
+def health_check():
+    return "✅ Bot is running!", 200
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return 'OK', 200
+    return 'Bad Request', 400
+
+# ========== BOT CONFIGURATION ==========
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
+RAPIDAPI_HOST = "youtube-mp4-mp3-m4a-cdn.p.rapidapi.com"
+COOLDOWN_TIME = 5
+TEMP_DIR = "downloads"
+
+# Initialize bot
 bot = telebot.TeleBot(BOT_TOKEN)
 user_last_request = {}
 
-# Ensure temp directory exists
+# Create temp directory
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("bot.log"),
-        logging.StreamHandler()
-    ]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 # ========== HELPER FUNCTIONS ==========
 def search_youtube(query):
-    """Search YouTube and return best matching video info"""
     try:
         ydl_opts = {
             'quiet': True,
@@ -55,7 +74,6 @@ def search_youtube(query):
     return None
 
 def get_download_url(video_id, file_type):
-    """Get direct download URL from RapidAPI"""
     url = f"https://{RAPIDAPI_HOST}/cdn"
     headers = {
         "x-rapidapi-key": RAPIDAPI_KEY,
@@ -78,42 +96,28 @@ def get_download_url(video_id, file_type):
     return None
 
 def download_file(url, file_path):
-    """Download file with progress"""
     try:
         response = requests.get(url, stream=True, timeout=60)
-        total_size = int(response.headers.get('content-length', 0))
-        downloaded = 0
-        
         with open(file_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
                     f.write(chunk)
-                    downloaded += len(chunk)
-                    if total_size:
-                        percent = (downloaded / total_size) * 100
-                        logger.info(f"Download progress: {percent:.2f}%")
         return True
     except Exception as e:
         logger.error(f"Download error: {e}")
         return False
 
 def format_duration(seconds):
-    """Format duration in mm:ss or hh:mm:ss"""
     if not seconds:
         return "Unknown"
-    hours = seconds // 3600
-    minutes = (seconds % 3600) // 60
+    minutes = seconds // 60
     seconds = seconds % 60
-    if hours > 0:
-        return f"{hours}:{minutes:02d}:{seconds:02d}"
     return f"{minutes}:{seconds:02d}"
 
 def clean_filename(title):
-    """Clean filename for safe saving"""
     return re.sub(r'[\\/*?:"<>|]', "", title)[:100]
 
 def delete_temp_file(file_path):
-    """Delete temp file after delay"""
     time.sleep(5)
     try:
         if os.path.exists(file_path):
@@ -122,7 +126,6 @@ def delete_temp_file(file_path):
         logger.error(f"Delete error: {e}")
 
 def can_send(user_id):
-    """Anti-spam cooldown"""
     now = time.time()
     if user_id in user_last_request:
         if now - user_last_request[user_id] < COOLDOWN_TIME:
@@ -142,55 +145,23 @@ Send me any **song name** or **video title** and I'll find it for you!
 • Simply type: `Believer Imagine Dragons`
 • I'll search YouTube and give you download options
 
-**Features:**
-🎧 MP3 Audio download
-🎬 MP4 Video download
-⚡ Fast & Free
-🛡 No ads
-
 **Commands:**
 /start - Restart bot
 /help - Show this menu
-/about - About bot
-
-Enjoy! 🎶
 """
     bot.reply_to(message, welcome_text, parse_mode="Markdown")
-
-@bot.message_handler(commands=['about'])
-def about_bot(message):
-    about_text = """
-🤖 **Bot Information**
-
-📌 Version: 1.0
-👨‍💻 Built with: pyTelegramBotAPI + yt-dlp
-🔗 API: YouTube CDN via RapidAPI
-
-**Features:**
-• Automatic YouTube search
-• MP3 & MP4 download
-• Inline keyboard UI
-• Anti-spam protection
-• Auto-clean temp files
-
-**Support:** https://t.me/k_raw_official
-"""
-    bot.reply_to(message, about_text, parse_mode="Markdown")
 
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
     user_id = message.chat.id
     song_name = message.text.strip()
     
-    # Anti-spam check
     if not can_send(user_id):
         bot.reply_to(message, "⏳ Please wait before sending another request!")
         return
     
-    # Send searching message
-    searching_msg = bot.reply_to(message, "🔍 **Searching music...**\n⏳ Please wait...", parse_mode="Markdown")
+    searching_msg = bot.reply_to(message, "🔍 **Searching...**\n⏳ Please wait...", parse_mode="Markdown")
     
-    # Search YouTube
     video_info = search_youtube(song_name)
     
     if not video_info:
@@ -202,17 +173,14 @@ def handle_message(message):
         )
         return
     
-    # Format duration
     duration = format_duration(video_info['duration'])
-    title = video_info['title'][:100]  # Limit title length
+    title = video_info['title'][:100]
     
-    # Create inline keyboard
     keyboard = InlineKeyboardMarkup(row_width=2)
     btn_mp3 = InlineKeyboardButton("🎵 Download MP3", callback_data=f"mp3|{video_info['id']}|{title}")
     btn_mp4 = InlineKeyboardButton("🎬 Download MP4", callback_data=f"mp4|{video_info['id']}|{title}")
     keyboard.add(btn_mp3, btn_mp4)
     
-    # Edit message with preview
     preview_text = f"""
 ✅ **Song Found**
 ━━━━━━━━━━━━━━━
@@ -223,27 +191,13 @@ def handle_message(message):
 Choose your format below:
 """
     
-    # Try to send thumbnail
-    try:
-        bot.edit_message_text(
-            preview_text,
-            chat_id=user_id,
-            message_id=searching_msg.message_id,
-            parse_mode="Markdown",
-            reply_markup=keyboard
-        )
-        # Send thumbnail separately if possible
-        if video_info['thumbnail']:
-            bot.send_photo(user_id, video_info['thumbnail'], caption="🎵 Song Preview")
-    except Exception as e:
-        logger.error(f"Edit message error: {e}")
-        bot.edit_message_text(
-            preview_text,
-            chat_id=user_id,
-            message_id=searching_msg.message_id,
-            parse_mode="Markdown",
-            reply_markup=keyboard
-        )
+    bot.edit_message_text(
+        preview_text,
+        chat_id=user_id,
+        message_id=searching_msg.message_id,
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
@@ -254,15 +208,13 @@ def handle_callback(call):
         bot.answer_callback_query(call.id, "Invalid request!")
         return
     
-    file_type = data[0]  # mp3 or mp4
+    file_type = data[0]
     video_id = data[1]
     title = data[2]
     
-    # Acknowledge callback
     bot.answer_callback_query(call.id, f"Processing {file_type.upper()}...")
     
-    # Update message to show processing
-    processing_text = f"⏳ **Processing {file_type.upper()} download...**\n\n🎵 {title}\nPlease wait, this may take a few moments."
+    processing_text = f"⏳ **Processing {file_type.upper()} download...**\n\n🎵 {title}\nPlease wait..."
     bot.edit_message_text(
         processing_text,
         chat_id=user_id,
@@ -270,7 +222,6 @@ def handle_callback(call):
         parse_mode="Markdown"
     )
     
-    # Get download URL from API
     download_url = get_download_url(video_id, file_type)
     
     if not download_url:
@@ -282,15 +233,10 @@ def handle_callback(call):
         )
         return
     
-    # Prepare filename
     safe_title = clean_filename(title)
     extension = "mp3" if file_type == "mp3" else "mp4"
     file_path = os.path.join(TEMP_DIR, f"{safe_title}_{int(time.time())}.{extension}")
     
-    # Send "downloading" status
-    status_msg = bot.send_message(user_id, "📥 **Downloading file...**", parse_mode="Markdown")
-    
-    # Download file
     success = download_file(download_url, file_path)
     
     if not success:
@@ -300,13 +246,8 @@ def handle_callback(call):
             message_id=call.message.message_id,
             parse_mode="Markdown"
         )
-        bot.delete_message(user_id, status_msg.message_id)
         return
     
-    # Delete status message
-    bot.delete_message(user_id, status_msg.message_id)
-    
-    # Send file to user
     try:
         with open(file_path, 'rb') as f:
             if file_type == "mp3":
@@ -325,8 +266,7 @@ def handle_callback(call):
                     supports_streaming=True
                 )
         
-        # Update original message to success
-        success_text = f"✅ **Download complete!**\n\n🎵 {title}\n📁 Format: {file_type.upper()}\n\nFile sent successfully!"
+        success_text = f"✅ **Download complete!**\n\n🎵 {title}\n📁 Format: {file_type.upper()}"
         bot.edit_message_text(
             success_text,
             chat_id=user_id,
@@ -337,22 +277,32 @@ def handle_callback(call):
     except Exception as e:
         logger.error(f"Send file error: {e}")
         bot.edit_message_text(
-            "❌ **Failed to send file!**\nFile may be too large for Telegram.",
+            "❌ **Failed to send file!**",
             chat_id=user_id,
             message_id=call.message.message_id,
             parse_mode="Markdown"
         )
     
-    # Cleanup temp file
     threading.Thread(target=delete_temp_file, args=(file_path,), daemon=True).start()
 
-# ========== START BOT ==========
+# ========== RUN BOT WITH FLASK ==========
+def run_bot():
+    """Remove webhook and start polling in background"""
+    try:
+        bot.remove_webhook()
+        logger.info("Starting bot polling...")
+        bot.infinity_polling(timeout=30, long_polling_timeout=30)
+    except Exception as e:
+        logger.error(f"Polling error: {e}")
+
 if __name__ == "__main__":
     logger.info("Bot started!")
-    print("🤖 Music Downloader Bot is running...")
-    try:
-        bot.infinity_polling(timeout=30, long_polling_timeout=30)
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"Bot error: {e}")
+    
+    # Start bot polling in background thread
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    
+    # Run Flask app on port 8080 (required for Render)
+    port = int(os.environ.get("PORT", 8080))
+    logger.info(f"Starting Flask server on port {port}...")
+    app.run(host='0.0.0.0', port=port)
