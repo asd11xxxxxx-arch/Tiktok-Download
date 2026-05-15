@@ -1,151 +1,358 @@
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
+import requests
+import yt_dlp
 import os
-import threading
+import re
+import time
 import logging
-from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-    CallbackQueryHandler,
-    ConversationHandler
-)
-from yt_dlp import YoutubeDL
+import threading
+from datetime import datetime
+from config import BOT_TOKEN, RAPIDAPI_KEY, RAPIDAPI_HOST, COOLDOWN_TIME, TEMP_DIR
 
-# --- LOGGING (Error တွေကို သိနိုင်အောင်) ---
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+# ========== CONFIGURATION ==========
+bot = telebot.TeleBot(BOT_TOKEN)
+user_last_request = {}
 
-# --- RENDER KEEP ALIVE SERVER ---
-app = Flask(__name__)
+# Ensure temp directory exists
+os.makedirs(TEMP_DIR, exist_ok=True)
 
-@app.route('/')
-def home():
-    return "Bot is active!"
-
-def run_web():
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port)
-
-# --- CONFIGURATION ---
-# Render ရဲ့ Env Vars ထဲမှာ TOKEN ထည့်ထားရင် ပိုကောင်းပါတယ်။ 
-TOKEN = os.environ.get("TOKEN", "8512086853:AAHK2NEV83KsG34QqTbwGHIULZEgXVo3tW4")
-
-CHOOSING, DOWNLOADING = range(2)
-
-# Emoji Codes
-U_WAVE, U_VIDEO, U_MUSIC, U_PHOTO, U_LINK, U_WAIT, U_CHECK, U_ERROR, U_ROCKET = (
-    "\U0001F44B", "\U0001F3AC", "\U0001F3B5", "\U0001F4F8", "\U0001F517", "\U000023F3", "\U00002705", "\U0000274C", "\U0001F680"
-)
-
-# --- START COMMAND ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton(f"{U_VIDEO} Video (No Logo)", callback_data='video')],
-        [InlineKeyboardButton(f"{U_MUSIC} Music (MP3)", callback_data='music')],
-        [InlineKeyboardButton(f"{U_PHOTO} Photos (Album)", callback_data='photo')]
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler()
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    text = f"{U_WAVE} *TikTok Downloader*\n\nဘာကို ဒေါင်းလုဒ်ဆွဲချင်ပါသလဲ?\nအောက်က Button တစ်ခုရွေးပါ။"
+)
+logger = logging.getLogger(__name__)
 
-    if update.callback_query:
-        await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
-    else:
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
-    return CHOOSING
-
-async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data['choice'] = query.data
-    await query.edit_message_text(f"{U_ROCKET} Selected: {query.data.upper()}\n\n{U_LINK} TikTok Link ကို ပို့ပေးပါ။")
-    return DOWNLOADING
-
-# --- DOWNLOAD PROCESS ---
-async def download_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text
-    choice = context.user_data.get("choice")
-
-    if "tiktok.com" not in url:
-        await update.message.reply_text(f"{U_ERROR} Link မှားနေပါတယ် (TikTok Link သာပို့ပါ)")
-        return DOWNLOADING
-
-    status_msg = await update.message.reply_text(f"{U_WAIT} လုပ်ဆောင်နေပါပြီ...")
-
-    # yt-dlp Options
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'outtmpl': '/tmp/%(id)s.%(ext)s',
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
-
-    if choice == "music":
-        ydl_opts['format'] = 'bestaudio/best'
-        ydl_opts['postprocessors'] = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }]
-
+# ========== HELPER FUNCTIONS ==========
+def search_youtube(query):
+    """Search YouTube and return best matching video info"""
     try:
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            
-            if choice == "photo":
-                # Photo Album တွေကို extract လုပ်ခြင်း
-                image_urls = []
-                if 'entries' in info:
-                    image_urls = [e['url'] for e in info['entries'] if 'url' in e]
-                elif info.get('thumbnails'):
-                    image_urls = [info['thumbnails'][-1]['url']]
-                
-                if image_urls:
-                    media = [InputMediaPhoto(img) for img in image_urls[:10]]
-                    await update.message.reply_media_group(media)
-                else:
-                    await update.message.reply_text("ပုံများ ရှာမတွေ့ပါ။")
-            
-            else:
-                file_path = ydl.prepare_filename(info)
-                if choice == "music":
-                    file_path = file_path.rsplit(".", 1)[0] + ".mp3"
-                
-                with open(file_path, "rb") as f:
-                    if choice == "video":
-                        await update.message.reply_video(video=f, caption=f"{U_CHECK} Done!")
-                    else:
-                        await update.message.reply_audio(audio=f, caption=f"{U_MUSIC} Done!")
-                
-                # ပို့ပြီးရင် File ပြန်ဖျက်မယ်
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-
-        await status_msg.delete()
-
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,
+            'force_generic_extractor': False,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            search_query = f"ytsearch1:{query}"
+            info = ydl.extract_info(search_query, download=False)
+            if 'entries' in info and len(info['entries']) > 0:
+                video = info['entries'][0]
+                return {
+                    'id': video['id'],
+                    'title': video['title'],
+                    'duration': video.get('duration', 0),
+                    'thumbnail': video.get('thumbnail', ''),
+                    'url': video.get('url', '')
+                }
     except Exception as e:
-        logging.error(f"Download Error: {e}")
-        await status_msg.edit_text(f"{U_ERROR} အဆင်မပြေပါ (Private Video ဖြစ်နိုင်သလို Link သေနေတာလည်း ဖြစ်နိုင်ပါတယ်)")
+        logger.error(f"Search error: {e}")
+    return None
 
-    return await start(update, context)
+def get_download_url(video_id, file_type):
+    """Get direct download URL from RapidAPI"""
+    url = f"https://{RAPIDAPI_HOST}/cdn"
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": RAPIDAPI_HOST,
+        "Content-Type": "application/json"
+    }
+    payload = {"id": video_id}
+    
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=30)
+        data = response.json()
+        
+        if response.status_code == 200 and 'data' in data:
+            if file_type == 'mp3' and 'mp3' in data['data']:
+                return data['data']['mp3']['url']
+            elif file_type == 'mp4' and 'mp4' in data['data']:
+                return data['data']['mp4']['url']
+    except Exception as e:
+        logger.error(f"RapidAPI error: {e}")
+    return None
 
-def main():
-    threading.Thread(target=run_web, daemon=True).start()
-    application = Application.builder().token(TOKEN).build()
+def download_file(url, file_path):
+    """Download file with progress"""
+    try:
+        response = requests.get(url, stream=True, timeout=60)
+        total_size = int(response.headers.get('content-length', 0))
+        downloaded = 0
+        
+        with open(file_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size:
+                        percent = (downloaded / total_size) * 100
+                        logger.info(f"Download progress: {percent:.2f}%")
+        return True
+    except Exception as e:
+        logger.error(f"Download error: {e}")
+        return False
 
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            CHOOSING: [CallbackQueryHandler(button_click)],
-            DOWNLOADING: [MessageHandler(filters.TEXT & ~filters.COMMAND, download_process)],
-        },
-        fallbacks=[CommandHandler("start", start)],
+def format_duration(seconds):
+    """Format duration in mm:ss or hh:mm:ss"""
+    if not seconds:
+        return "Unknown"
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    seconds = seconds % 60
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
+def clean_filename(title):
+    """Clean filename for safe saving"""
+    return re.sub(r'[\\/*?:"<>|]', "", title)[:100]
+
+def delete_temp_file(file_path):
+    """Delete temp file after delay"""
+    time.sleep(5)
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+    except Exception as e:
+        logger.error(f"Delete error: {e}")
+
+def can_send(user_id):
+    """Anti-spam cooldown"""
+    now = time.time()
+    if user_id in user_last_request:
+        if now - user_last_request[user_id] < COOLDOWN_TIME:
+            return False
+    user_last_request[user_id] = now
+    return True
+
+# ========== BOT HANDLERS ==========
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
+    welcome_text = """
+🎵 **Music & Video Downloader Bot** 🎬
+
+Send me any **song name** or **video title** and I'll find it for you!
+
+**How to use:**
+• Simply type: `Believer Imagine Dragons`
+• I'll search YouTube and give you download options
+
+**Features:**
+🎧 MP3 Audio download
+🎬 MP4 Video download
+⚡ Fast & Free
+🛡 No ads
+
+**Commands:**
+/start - Restart bot
+/help - Show this menu
+/about - About bot
+
+Enjoy! 🎶
+"""
+    bot.reply_to(message, welcome_text, parse_mode="Markdown")
+
+@bot.message_handler(commands=['about'])
+def about_bot(message):
+    about_text = """
+🤖 **Bot Information**
+
+📌 Version: 1.0
+👨‍💻 Built with: pyTelegramBotAPI + yt-dlp
+🔗 API: YouTube CDN via RapidAPI
+
+**Features:**
+• Automatic YouTube search
+• MP3 & MP4 download
+• Inline keyboard UI
+• Anti-spam protection
+• Auto-clean temp files
+
+**Support:** @YourSupportChannel
+"""
+    bot.reply_to(message, about_text, parse_mode="Markdown")
+
+@bot.message_handler(func=lambda message: True)
+def handle_message(message):
+    user_id = message.chat.id
+    song_name = message.text.strip()
+    
+    # Anti-spam check
+    if not can_send(user_id):
+        bot.reply_to(message, "⏳ Please wait before sending another request!")
+        return
+    
+    # Send searching message
+    searching_msg = bot.reply_to(message, "🔍 **Searching music...**\n⏳ Please wait...", parse_mode="Markdown")
+    
+    # Search YouTube
+    video_info = search_youtube(song_name)
+    
+    if not video_info:
+        bot.edit_message_text(
+            "❌ **No results found!**\nPlease try a different song name.",
+            chat_id=user_id,
+            message_id=searching_msg.message_id,
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Format duration
+    duration = format_duration(video_info['duration'])
+    title = video_info['title'][:100]  # Limit title length
+    
+    # Create inline keyboard
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    btn_mp3 = InlineKeyboardButton("🎵 Download MP3", callback_data=f"mp3|{video_info['id']}|{title}")
+    btn_mp4 = InlineKeyboardButton("🎬 Download MP4", callback_data=f"mp4|{video_info['id']}|{title}")
+    keyboard.add(btn_mp3, btn_mp4)
+    
+    # Edit message with preview
+    preview_text = f"""
+✅ **Song Found**
+━━━━━━━━━━━━━━━
+🎧 **Title:** {title}
+⏱ **Duration:** {duration}
+━━━━━━━━━━━━━━━
+
+Choose your format below:
+"""
+    
+    # Try to send thumbnail
+    try:
+        bot.edit_message_text(
+            preview_text,
+            chat_id=user_id,
+            message_id=searching_msg.message_id,
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+        # Send thumbnail separately if possible
+        if video_info['thumbnail']:
+            bot.send_photo(user_id, video_info['thumbnail'], caption="🎵 Song Preview")
+    except Exception as e:
+        logger.error(f"Edit message error: {e}")
+        bot.edit_message_text(
+            preview_text,
+            chat_id=user_id,
+            message_id=searching_msg.message_id,
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
+    user_id = call.message.chat.id
+    data = call.data.split('|')
+    
+    if len(data) < 3:
+        bot.answer_callback_query(call.id, "Invalid request!")
+        return
+    
+    file_type = data[0]  # mp3 or mp4
+    video_id = data[1]
+    title = data[2]
+    
+    # Acknowledge callback
+    bot.answer_callback_query(call.id, f"Processing {file_type.upper()}...")
+    
+    # Update message to show processing
+    processing_text = f"⏳ **Processing {file_type.upper()} download...**\n\n🎵 {title}\nPlease wait, this may take a few moments."
+    bot.edit_message_text(
+        processing_text,
+        chat_id=user_id,
+        message_id=call.message.message_id,
+        parse_mode="Markdown"
     )
+    
+    # Get download URL from API
+    download_url = get_download_url(video_id, file_type)
+    
+    if not download_url:
+        bot.edit_message_text(
+            "❌ **Download failed!**\nCould not fetch download URL. Please try again later.",
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Prepare filename
+    safe_title = clean_filename(title)
+    extension = "mp3" if file_type == "mp3" else "mp4"
+    file_path = os.path.join(TEMP_DIR, f"{safe_title}_{int(time.time())}.{extension}")
+    
+    # Send "downloading" status
+    status_msg = bot.send_message(user_id, "📥 **Downloading file...**", parse_mode="Markdown")
+    
+    # Download file
+    success = download_file(download_url, file_path)
+    
+    if not success:
+        bot.edit_message_text(
+            "❌ **Download failed!**\nNetwork error or invalid URL.",
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            parse_mode="Markdown"
+        )
+        bot.delete_message(user_id, status_msg.message_id)
+        return
+    
+    # Delete status message
+    bot.delete_message(user_id, status_msg.message_id)
+    
+    # Send file to user
+    try:
+        with open(file_path, 'rb') as f:
+            if file_type == "mp3":
+                bot.send_audio(
+                    user_id,
+                    f,
+                    title=title,
+                    performer="Music Bot",
+                    caption=f"🎵 **{title}**\n✅ Downloaded successfully!"
+                )
+            else:
+                bot.send_video(
+                    user_id,
+                    f,
+                    caption=f"🎬 **{title}**\n✅ Downloaded successfully!",
+                    supports_streaming=True
+                )
+        
+        # Update original message to success
+        success_text = f"✅ **Download complete!**\n\n🎵 {title}\n📁 Format: {file_type.upper()}\n\nFile sent successfully!"
+        bot.edit_message_text(
+            success_text,
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            parse_mode="Markdown"
+        )
+        
+    except Exception as e:
+        logger.error(f"Send file error: {e}")
+        bot.edit_message_text(
+            "❌ **Failed to send file!**\nFile may be too large for Telegram.",
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            parse_mode="Markdown"
+        )
+    
+    # Cleanup temp file
+    threading.Thread(target=delete_temp_file, args=(file_path,), daemon=True).start()
 
-    application.add_handler(conv_handler)
-    application.run_polling()
-
+# ========== START BOT ==========
 if __name__ == "__main__":
-    main()
-
+    logger.info("Bot started!")
+    print("🤖 Music Downloader Bot is running...")
+    try:
+        bot.infinity_polling(timeout=30, long_polling_timeout=30)
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Bot error: {e}")
