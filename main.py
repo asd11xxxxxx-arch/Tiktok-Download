@@ -173,7 +173,7 @@ def about_bot(message):
 • Anti-spam protection
 • Auto-clean temp files
 
-**Support:** @YourSupportChannel
+**Support:** https://t.me/k_raw_official
 """
     bot.reply_to(message, about_text, parse_mode="Markdown")
 
